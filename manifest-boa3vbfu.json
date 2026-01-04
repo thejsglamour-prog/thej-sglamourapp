@@ -1,0 +1,27 @@
+{
+  "short_name": "J's Glamour",
+  "name": "THE J'S GLAMOUR - Premium Salon",
+  "icons": [
+    {
+      "src": "/assets/logo-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/assets/logo-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    },
+    {
+      "src": "/assets/logo-maskable.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#050505",
+  "display": "standalone",
+  "theme_color": "#D4AF37",
+  "description": "Premium unisex salon and grooming lounge in Abuloma, Port Harcourt."
+}
