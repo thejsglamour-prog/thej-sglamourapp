@@ -1,40 +1,92 @@
-// Serverless endpoint for Vercel/Netlify that proxies AI requests to Google GenAI.
-// Expects process.env.GENAI_API_KEY to be set on the server (do NOT commit keys).
-import { GoogleGenAI } from "@google/genai";
+import type { NextApiRequest, NextApiResponse } from 'next'
 
-const apiKey = process.env.GENAI_API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
+// A simple streaming proxy for GenAI providers. It accepts JSON POSTs and
+// proxies to the provider configured via environment variables. If the
+// incoming request includes `stream: true`, the proxy streams the provider's
+// response back to the client as NDJSON/passthrough streaming.
 
-export default async function handler(req: any, res: any) {
+const PROVIDER_URL = process.env.GENAI_PROVIDER_URL || process.env.GOOGLE_API_URL || process.env.OPENAI_API_URL
+const API_KEY = process.env.GENAI_API_KEY || process.env.GOOGLE_API_KEY || process.env.OPENAI_API_KEY
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST');
-    return res.status(405).json({ error: 'Method not allowed' });
+    res.setHeader('Allow', 'POST')
+    return res.status(405).json({ error: 'Method Not Allowed' })
+  }
+
+  if (!PROVIDER_URL || !API_KEY) {
+    return res.status(500).json({ error: 'GenAI provider URL or API key not configured' })
   }
 
   try {
-    const { history, promptOverride } = req.body || {};
+    const body = req.body || {}
+    const stream = Boolean(body.stream)
 
-    // Build prompt from history (fall back to promptOverride if provided)
-    let prompt: string;
-    if (promptOverride && typeof promptOverride === 'string') {
-      prompt = promptOverride;
-    } else if (Array.isArray(history)) {
-      prompt = history.map((m: any) => `${m.role === 'user' ? 'User' : 'System'}: ${m.text}`).join('\n') + '\n\nRespond concisely within THE J\'S GLAMOUR persona.';
-    } else {
-      prompt = 'You are the Master AI Concierge for THE J\'S GLAMOUR. Provide concise, technical advice.';
+    // Build proxy request to provider. We pass through body, but always
+    // ensure streaming flag is present when requested.
+    const upstreamPayload = {
+      ...body,
+      stream
     }
 
-    const result = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: { temperature: 0.7, topP: 0.95, topK: 40 }
-    });
+    const upstreamRes = await fetch(PROVIDER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${API_KEY}`
+      },
+      body: JSON.stringify(upstreamPayload)
+    })
 
-    const text = (result && (result as any).text) || '';
+    if (!upstreamRes.ok) {
+      const text = await upstreamRes.text().catch(() => '')
+      return res.status(upstreamRes.status).json({ error: 'Upstream error', details: text })
+    }
 
-    return res.status(200).json({ text });
-  } catch (err) {
-    console.error('genai handler error:', err);
-    return res.status(500).json({ error: 'AI generation failed' });
+    // If caller didn't request streaming, just forward JSON.
+    if (!stream) {
+      const json = await upstreamRes.json()
+      return res.status(200).json(json)
+    }
+
+    // Stream mode: stream response body to client as NDJSON/passthrough
+    // Set streaming-friendly headers
+    res.setHeader('Content-Type', 'application/x-ndjson')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+
+    // In Node (Next.js API routes) we can use the readable stream from the
+    // fetch response and pipe chunks to the express-style res.write
+    const reader = upstreamRes.body?.getReader()
+    if (!reader) {
+      // No body to stream
+      return res.status(500).json({ error: 'No streaming body from upstream provider' })
+    }
+
+    const utf8 = new TextDecoder()
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (value) {
+        // Convert chunk to string and write as-is. The provider may already
+        // send NDJSON or SSE-like data; we pass through to the client.
+        const chunk = utf8.decode(value)
+        // Ensure each piece ends with a newline to make downstream parsing easier
+        const normalized = chunk.endsWith('\n') ? chunk : chunk + '\n'
+        // Write chunk; Node's res.write accepts strings or Buffers
+        res.write(normalized)
+      }
+    }
+
+    // End of stream
+    res.end()
+  } catch (err: any) {
+    console.error('GenAI proxy error:', err)
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'GenAI proxy error', message: String(err?.message || err) })
+    } else {
+      try { res.end() } catch {} // ignore
+    }
   }
 }
